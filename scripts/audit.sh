@@ -57,5 +57,22 @@ if (( find_status == 0 )) && [[ -z "$world_writable" && "$key_mode" == '600:root
     safe=true
 fi
 check 'No world-writable site paths; TLS key 600:root' true "$safe"
+
+echo '[5] Containerization'
+check 'Docker is active' active "$(systemctl is-active docker 2>/dev/null)"
+check 'PostgreSQL container is healthy' healthy \
+    "$(docker inspect -f '{{.State.Health.Status}}' app-db-1 2>/dev/null)"
+socket_list="$(ss -H -tln 2>/dev/null)"
+socket_status=$?
+local_ports=false
+if (( socket_status == 0 )) && awk '
+    $4 ~ /:(5000|5432)$/ && $4 !~ /^127\.0\.0\.1:(5000|5432)$/ {bad=1}
+    END {exit bad ? 1 : 0}
+' <<< "$socket_list"; then
+    local_ports=true
+fi
+check 'Ports 5000 and 5432 listen only on 127.0.0.1 or are absent' true "$local_ports"
+APP_DIR="${APP_DIR:-$(getent passwd devops | cut -d: -f6)/app}"
+check 'Server .env permissions equal 600' 600 "$(stat -c '%a' "$APP_DIR/.env" 2>/dev/null)"
 printf 'Passed: %s; failed: %s\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

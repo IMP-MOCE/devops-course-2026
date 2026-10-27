@@ -1,2 +1,4 @@
 *.sh text eol=lf
 site/*.html text eol=lf
+app/** text eol=lf
+.gitignore text eol=lf
