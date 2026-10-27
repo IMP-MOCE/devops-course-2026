@@ -33,6 +33,7 @@ if "$DRY_RUN"; then
     printf 'Dry run complete: %s (server unchanged)\n' "$COMMIT"
     exit 0
 fi
-curl --noproxy '*' --fail --silent --show-error --connect-timeout 5 --max-time 15 \
+curl --noproxy '*' --fail --silent --show-error --connect-timeout 10 --max-time 30 \
+    --retry 2 --retry-delay 1 --retry-connrefused \
     --cacert "$CA_CERT" --output /dev/null "$SITE_URL" || die 'HTTPS health check failed'
 printf 'Deployment complete: %s\n' "$COMMIT"
