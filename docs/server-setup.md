@@ -260,3 +260,152 @@ scripts/deploy.sh
 Восстановление пользователя, SSH, UFW и имени повторено: аудит №5 дал 6/6, код 0.
 Загрузка старого снимка потребовала вернуть профиль `Ubuntu24_LTS_64` и отключить ненужный звук;
 из-за диагностики загрузки общий этап восстановления вышел за аудиторный лимит 10 минут.
+
+## 9. Контейнеризация
+
+Практическая работа №7, 27.10.2026. Установлены Docker Engine и CLI 29.9.2,
+Compose v5.6.1, Buildx v0.38.1 и containerd 2.4.2 из официального APT-репозитория
+Docker для Ubuntu 24.04 noble, amd64. Пакет Ubuntu `docker.io` не используется.
+Установка: https://docs.docker.com/engine/install/ubuntu/.
+
+После разделов 1–8 на VM выполнить:
+
+```bash
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+  -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+sudo tee /etc/apt/sources.list.d/docker.sources >/dev/null <<'EOF'
+Types: deb
+URIs: https://download.docker.com/linux/ubuntu
+Suites: noble
+Components: stable
+Architectures: amd64
+Signed-By: /etc/apt/keyrings/docker.asc
+EOF
+sudo apt update
+sudo apt install -y docker-ce docker-ce-cli containerd.io \
+  docker-buildx-plugin docker-compose-plugin
+sudo usermod -aG docker devops
+```
+
+Группа `docker` содержит только `devops`, которому ранее выдано sudo. Доступ к
+сокету Docker равнозначен возможностям root внутри VM; непривилегированные
+учётные записи в эту группу не добавлять. Открыть новую SSH-сессию:
+
+```bash
+id
+docker version
+docker compose version
+docker run --rm hello-world
+```
+
+Проект на сервере: `/home/devops/app`, владелец devops. Исходники находятся в
+`app/` репозитория. Образ `devops-app:1.0` строится из `python:3.12-slim`.
+Dockerfile копирует зависимости до кода, устанавливает точные версии из
+requirements.txt, затем задаёт `USER app` и exec-форму CMD Gunicorn на 5000.
+Файлы приложения в образе принадлежат root и имеют 644: app их читает, но не пишет.
+Версии зависимостей сохранены по учебному шаблону; перед промышленным использованием
+нужны отдельные обновление и проверка зависимостей.
+
+Доставка с хоста, из корня репозитория в WSL1 DevOps-P6:
+
+```bash
+rsync -avz --delete --exclude=.env --chmod=D755,F644 --dry-run app/ devops:app/
+rsync -avz --delete --exclude=.env --chmod=D755,F644 app/ devops:app/
+```
+
+Исключение `.env` обязательно и при повторной доставке: оно защищает серверный
+файл от `--delete`. Нормализация прав устраняет исходные 777 на `/mnt/c`.
+На VM создать секрет один раз; при существующем томе пароль не менять:
+
+```bash
+cd ~/app
+umask 077
+if test ! -e .env; then
+  cp .env.example .env
+  sed -i "s/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=$(openssl rand -hex 16)/" .env
+fi
+chmod 600 .env
+docker compose config --quiet
+docker compose up -d --build
+docker compose ps
+```
+
+Секрет `/home/devops/app/.env` принадлежит devops:devops, права 600, содержит
+POSTGRES_DB, POSTGRES_USER, POSTGRES_PASSWORD и DB_HOST=db. Его нельзя копировать
+на Windows, добавлять в Git, выводить в отчёт или помещать в образ.
+Публичный `.env.example` содержит только `change_me`. `.gitignore` исключает `.env`,
+`.dockerignore` исключает его из контекста сборки. Для проверки синтаксиса применять
+`docker compose config --quiet`, поскольку обычный `config` раскрывает переменные.
+
+Compose создаёт контейнеры `app-app-1` и `app-db-1`, сеть bridge `app_backend`
+и именованный том `app_db_data`, смонтированный в PostgreSQL по пути
+`/var/lib/postgresql/data`. Встроенный DNS сети разрешает имя `db` в адрес СУБД.
+Приложение ждёт healthy от `pg_isready` с помощью `depends_on: service_healthy`.
+`$$` в healthcheck откладывает раскрытие переменных до оболочки контейнера.
+Тег `postgres:16-alpine` фиксирует основную версию PostgreSQL.
+
+Приложение слушает 0.0.0.0:5000 внутри контейнера, но на VM опубликовано только
+`127.0.0.1:5000:5000`. Порт 5432 не опубликован вообще. Nginx с хоста VM имеет
+доступ к loopback; клиент Windows обращается только к HTTPS 443. Правила UFW из
+№5 сохранены. Публикация Docker на 0.0.0.0 обходит UFW через NAT/FORWARD, поэтому
+отсутствие allow 5000 в UFW не заменяет привязку к 127.0.0.1.
+
+В HTTPS-блок `/etc/nginx/sites-available/devops-site` добавить:
+
+```nginx
+location /app/ {
+    proxy_pass http://127.0.0.1:5000/;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+Завершающий `/` в proxy_pass заменяет префикс `/app/`: `/app/health` передаётся
+как `/health`. Статический `location /` и каталог `/var/www/devops-site` сохранены.
+Полная конфигурация находится в `config/nginx/devops-site.conf`. Передать её
+через scp, затем на VM:
+
+```bash
+sudo install -m 644 ~/devops-site.conf /etc/nginx/sites-available/devops-site
+sudo nginx -t && sudo systemctl reload nginx
+docker compose exec app id
+docker compose exec app getent hosts db
+sudo ss -tlnp | grep -E ':(5000|5432)\b'
+```
+
+С клиента WSL:
+
+```bash
+curl --cacert ~/devops.crt https://devops.local/app/
+curl --cacert ~/devops.crt https://devops.local/app/health
+curl --cacert ~/devops.crt -I https://devops.local/
+```
+
+`/health` проверяет процесс приложения без соединения с БД. Успешный запрос `/`
+дополнительно проверяет подключение и запись в PostgreSQL. При 502 сначала проверить
+`docker compose ps`, локальный curl на 127.0.0.1:5000, затем журналы приложения
+и `/var/log/nginx/devops-site.error.log`, после этого параметры proxy_pass.
+
+`docker compose down` удаляет контейнеры и сеть, сохраняя `app_db_data` и счётчик.
+`down -v` удаляет и том: эта команда применялась только к свежему учебному счётчику
+для обязательного опыта сброса. При обычной остановке её не применять. Существующий
+проект, итоговый том и снимки сохраняются для контрольной №2 и следующих работ.
+
+Аудит в `~/scripts/audit.sh` теперь содержит раздел [5] и 14 проверок:
+активность docker, healthy у app-db-1, отсутствие привязок 5000/5432 вне 127.0.0.1,
+права `.env` 600, плюс прежние десять условий. Запускать `sudo -v`, затем
+`~/scripts/audit.sh; echo $?`. При запуске через sudo каталог приложения всё равно
+определяется из home учётной записи devops, а не /root; допускается APP_DIR.
+Проверка портов учитывает IPv4 и IPv6 и ошибку команды ss.
+
+Отрицательный опыт: временно заменить публикацию на `5000:5000`, выполнить
+`docker compose up -d`; ожидается ровно одна ошибка аудита и код 1. Сразу вернуть
+`127.0.0.1:5000:5000`, пересоздать приложение и получить 14/14, код 0.
+Не публиковать небезопасную временную конфигурацию в Git.
+
+Снимок `05-docker-compose` создаётся после корректного выключения VM, без RAM,
+после чего VM запускается снова. Снимок `04-nginx-https` сохраняется.
