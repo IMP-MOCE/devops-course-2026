@@ -173,3 +173,90 @@ hostname -f
 При первом запуске VirtualBox остановился на Loading essential drivers. Команды controlvm devops-vm pause и controlvm devops-vm resume позволили продолжить загрузку без сброса VM. При первом запуске cloud-init пересоздал host keys: окончательный отпечаток проверен по локальной консоли VM перед SSH, а не принят автоматически.
 
 Живое сохранение оперативной памяти при создании 02-keys-configured зависло и было отменено через штатный IProgress.Cancel. После восстановления работы VM снимки создаются при выключенной гостевой системе, без сохранения RAM.
+
+## 8. Веб-сервер
+
+Практическая работа №6, 27.10.2026. Nginx 1.24.0 из Ubuntu noble-updates; пакеты `nginx`, `rsync`, `openssl`.
+Конфигурация ресурса: `/etc/nginx/sites-available/devops-site`, ссылка в `sites-enabled/devops-site`.
+Её полная публичная копия: `config/nginx/devops-site.conf` в этом репозитории.
+Стандартный `sites-enabled/default` отключён удалением ссылки; исходный файл сохранён.
+
+Каталог `/var/www/devops-site` принадлежит `devops:devops`: каталоги 755, файлы 644.
+Рабочие процессы `www-data` читают содержимое, но не изменяют его.
+HTTP 80 перенаправляется кодом 301 на HTTPS 443, включая исходный URI.
+Host-only даёт прямой доступ к стандартным портам без дополнительного проброса NAT.
+Разрешены TLS 1.2 и 1.3. HSTS для учебного самоподписанного сертификата не включён.
+Оба блока server пишут запросы в `/var/log/nginx/devops-site.access.log`, ошибки — в `devops-site.error.log`.
+
+Сертификат `/etc/ssl/certs/devops.crt`: `root:root`, 644; закрытый ключ `/etc/ssl/private/devops.key`: `root:root`, 600.
+SAN: `DNS:devops.local`, RSA 2048, срок 365 дней. Фактический выпуск: 27.10.2026 13:50:39 UTC;
+окончание: 27.10.2027 13:50:39 UTC. Ключ не копируется за пределы VM и не публикуется.
+
+Восстановление после настройки SSH/UFW из разделов 1–7, команды на VM:
+
+```bash
+sudo apt update && sudo apt install -y nginx rsync openssl
+sudo install -d -m 755 -o devops -g devops /var/www/devops-site
+sudo openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+  -keyout /etc/ssl/private/devops.key \
+  -out /etc/ssl/certs/devops.crt \
+  -subj '/CN=devops.local' -addext 'subjectAltName=DNS:devops.local'
+sudo chown root:root /etc/ssl/private/devops.key /etc/ssl/certs/devops.crt
+sudo chmod 600 /etc/ssl/private/devops.key
+sudo chmod 644 /etc/ssl/certs/devops.crt
+```
+
+На Windows из корня репозитория передать публичную конфигурацию:
+
+```powershell
+scp config/nginx/devops-site.conf devops:devops-site.conf
+```
+
+На VM активировать ресурс:
+
+```bash
+sudo install -m 644 ~/devops-site.conf /etc/nginx/sites-available/devops-site
+sudo ln -sfn /etc/nginx/sites-available/devops-site /etc/nginx/sites-enabled/devops-site
+if test -L /etc/nginx/sites-enabled/default; then sudo unlink /etc/nginx/sites-enabled/default; fi
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+Перед повторным выпуском сохранить сертификат по проверенному SSH-каналу.
+После повторного выпуска нужно заново передать клиенту новую открытую часть:
+
+```bash
+# WSL1, SSH host key уже сверён независимо от SSH
+scp devops:/etc/ssl/certs/devops.crt ~/devops.crt
+curl --cacert ~/devops.crt -I https://devops.local
+```
+
+Клиент Windows для rsync: отдельная Ubuntu 24.04 WSL1 `DevOps-P6`, пользователь `nikita`.
+Импортирован официальный rootfs Canonical с проверкой SHA256; существующая Ubuntu WSL2 сохранена.
+Ключ и config скопированы в `/home/nikita/.ssh` с правами 600, каталог — 700.
+В WSL `/etc/hosts` добавлено `192.168.56.101 devops.local`.
+Для общей рабочей копии на `/mnt/c` задано `git config core.fileMode false`;
+`core.autocrlf true` согласован с Windows, а `.gitattributes` закрепляет LF для `*.sh` и `site/*.html`.
+
+После коммита запускать из корня репозитория или его подкаталога:
+
+```bash
+scripts/deploy.sh --dry-run
+scripts/deploy.sh
+```
+
+Первый запуск с `--delete` обязательно проверяется через dry-run. Источник только `site/`,
+назначение только `/var/www/devops-site/`. `--chmod=D755,F644` исправляет права 777 с Windows.
+`--checksum` также восстанавливает вручную подменённое содержимое.
+Один запуск использует ровно одно SSH-соединение rsync, BatchMode и проверенный known_hosts.
+Проверка HTTPS использует `--cacert`, ограниченные таймауты и два повтора сетевого запроса.
+Успех: код 0 и короткий хеш коммита; грязный Git, отсутствующий index, ошибка rsync/HTTPS: код 1.
+
+Аудит на VM: `sudo bash ~/scripts/audit.sh` — 10 проверок, код 0.
+Отрицательные опыты: `sudo env CERT_MIN_DAYS=400 bash ~/scripts/audit.sh` — код 1;
+временный `chmod 666 /var/www/devops-site/index.html` — код 1. После опыта вернуть 644.
+
+Снимок `04-nginx-https` создан при выключенной VM после HTTPS, до доставки `site/`.
+Снимок `03b-practice5-complete` сохраняет полный итог №5 перед восстановлением `01-clean-install`.
+Восстановление пользователя, SSH, UFW и имени повторено: аудит №5 дал 6/6, код 0.
+Загрузка старого снимка потребовала вернуть профиль `Ubuntu24_LTS_64` и отключить ненужный звук;
+из-за диагностики загрузки общий этап восстановления вышел за аудиторный лимит 10 минут.
