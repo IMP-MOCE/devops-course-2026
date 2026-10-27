@@ -1,0 +1,2 @@
+*.sh text eol=lf
+site/*.html text eol=lf
