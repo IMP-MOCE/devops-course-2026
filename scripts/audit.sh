@@ -36,5 +36,26 @@ check 'Firewall active' active "$(awk '/^Status:/ {print $2}' <<< "$ufw_config")
 check 'Incoming policy is deny' deny "$(awk '/^Default:/ {print $2}' <<< "$ufw_config")"
 echo '[3] User accounts'
 awk -F: '$3>=1000 && $3<65534 {printf "    %s (uid=%s)\n",$1,$3}' /etc/passwd
+
+echo '[4] Web server'
+check 'Nginx is active' active "$(systemctl is-active nginx 2>/dev/null)"
+sudo -n nginx -t >/dev/null 2>&1
+check 'Nginx configuration is valid' 0 "$?"
+MIN_DAYS="${CERT_MIN_DAYS:-30}"
+cert_status=1
+if [[ "$MIN_DAYS" =~ ^[0-9]+$ ]] && (( MIN_DAYS <= 20000 )); then
+    openssl x509 -in /etc/ssl/certs/devops.crt -noout \
+        -checkend "$((10#$MIN_DAYS * 86400))" >/dev/null 2>&1
+    cert_status=$?
+fi
+check "Certificate valid for at least ${MIN_DAYS} days" 0 "$cert_status"
+safe=false
+world_writable="$(find /var/www/devops-site -perm -o+w -print 2>/dev/null)"
+find_status=$?
+key_mode="$(sudo -n stat -c '%a:%U' /etc/ssl/private/devops.key 2>/dev/null)"
+if (( find_status == 0 )) && [[ -z "$world_writable" && "$key_mode" == '600:root' ]]; then
+    safe=true
+fi
+check 'No world-writable site paths; TLS key 600:root' true "$safe"
 printf 'Passed: %s; failed: %s\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]
