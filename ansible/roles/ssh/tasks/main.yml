@@ -1,0 +1,94 @@
+---
+- name: Create automation user
+  ansible.builtin.user:
+    name: devops
+    shell: /bin/bash
+    groups: sudo
+    append: true
+    create_home: true
+
+- name: Create automation SSH directory
+  ansible.builtin.file:
+    path: /home/devops/.ssh
+    state: directory
+    owner: devops
+    group: devops
+    mode: "0700"
+
+- name: Install automation public key
+  ansible.posix.authorized_key:
+    user: devops
+    state: present
+    key: "{{ lookup('ansible.builtin.file', '~/.ssh/devops_vm.pub') }}"
+    manage_dir: false
+
+- name: Allow non-interactive automation sudo
+  ansible.builtin.copy:
+    content: "devops ALL=(ALL) NOPASSWD:ALL\n"
+    dest: /etc/sudoers.d/devops
+    owner: root
+    group: root
+    mode: "0440"
+    validate: /usr/sbin/visudo -cf %s
+
+- name: Verify automation SSH key and sudo before hardening
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -i
+      - "{{ lookup('ansible.builtin.env', 'HOME') }}/.ssh/devops_vm"
+      - -o
+      - BatchMode=yes
+      - -o
+      - IdentitiesOnly=yes
+      - -o
+      - StrictHostKeyChecking=yes
+      - -o
+      - ConnectTimeout=12
+      - -p
+      - "{{ hostvars[inventory_hostname].ansible_port | default(22) | string }}"
+      - "devops@{{ hostvars[inventory_hostname].ansible_host }}"
+      - sudo -n true
+  delegate_to: localhost
+  become: false
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Harden SSH after verifying key access
+  ansible.builtin.copy:
+    content: |
+      PermitRootLogin no
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      PubkeyAuthentication yes
+      PermitEmptyPasswords no
+      AllowUsers student devops
+      X11Forwarding no
+    dest: /etc/ssh/sshd_config.d/00-ansible-hardening.conf
+    owner: root
+    group: root
+    mode: "0644"
+    validate: /usr/sbin/sshd -t -f %s
+  notify: Restart SSH
+
+- name: Allow SSH and HTTP
+  community.general.ufw:
+    rule: allow
+    port: "{{ item }}"
+    proto: tcp
+  loop: ["22", "80"]
+
+- name: Deny incoming connections by default
+  community.general.ufw:
+    default: deny
+    direction: incoming
+
+- name: Allow outgoing connections by default
+  community.general.ufw:
+    default: allow
+    direction: outgoing
+
+- name: Enable UFW
+  community.general.ufw:
+    state: enabled
+    logging: low

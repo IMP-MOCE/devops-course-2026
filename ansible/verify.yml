@@ -1,0 +1,45 @@
+---
+- name: Verify deployed configuration
+  hosts: vm
+  become: true
+
+  tasks:
+    - name: Read effective SSH configuration
+      ansible.builtin.command: /usr/sbin/sshd -T
+      register: sshd_effective
+      changed_when: false
+
+    - name: Verify effective SSH restrictions
+      ansible.builtin.assert:
+        that:
+          - "'passwordauthentication no' in sshd_effective.stdout_lines"
+          - "'kbdinteractiveauthentication no' in sshd_effective.stdout_lines"
+          - "'permitrootlogin no' in sshd_effective.stdout_lines"
+
+    - name: Read application container facts
+      community.docker.docker_container_info:
+        name: "{{ app_container_name }}"
+      register: app_container
+
+    - name: Verify running container and configured image
+      ansible.builtin.assert:
+        that:
+          - app_container.exists
+          - app_container.container.State.Running
+          - app_container.container.Config.Image == app_image ~ ":" ~ app_tag
+          - >-
+            app_container.container.NetworkSettings.Ports[app_internal_port | string ~ "/tcp"] ==
+            [{'HostIp': '127.0.0.1', 'HostPort': app_host_port | string}]
+
+    - name: Check health through Nginx and on container loopback
+      ansible.builtin.uri:
+        url: "{{ item }}"
+        use_proxy: false
+        return_content: true
+      loop:
+        - http://127.0.0.1/health
+        - "http://127.0.0.1:{{ app_host_port }}/health"
+      register: health_probes
+      failed_when: >-
+        (health_probes.status | default(-1)) != 200 or
+        (health_probes.json | default({})).get("status") != "ok"

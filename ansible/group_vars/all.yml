@@ -1,0 +1,6 @@
+---
+app_image: ghcr.io/imp-moce/devops-ci-app
+app_tag: "92d679c630808f5d06c4935ea794d4b55d9e0e5f"
+app_container_name: devops-ci-app
+app_host_port: 5000
+app_internal_port: 5000
