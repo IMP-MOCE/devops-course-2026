@@ -409,3 +409,49 @@ curl --cacert ~/devops.crt -I https://devops.local/
 
 Снимок `05-docker-compose` создаётся после корректного выключения VM, без RAM,
 после чего VM запускается снова. Снимок `04-nginx-https` сохраняется.
+
+## 10. Ansible
+
+Проект находится в каталоге `ansible/` репозитория. Управляющий узел — Ubuntu в WSL,
+для прямого доступа к Host-only сети использовался дистрибутив DevOps-P6 (WSL1).
+Копия репозитория находится в файловой системе WSL. Запуск из `/mnt/c` может
+привести к игнорированию `ansible.cfg` из-за прав каталога.
+
+Управляемый узел — Ubuntu Server 24.04 amd64 из снимка `01-clean-install`.
+Для лаборатории использовалась связанная копия `devops-vm-lab11` с адресом
+`192.168.56.101` и SSH на порту 22. Исходную VM с таким же адресом следует
+держать выключенной, пока работает копия.
+
+- `inventory/bootstrap.ini` — первичное подключение как `student` с паролем.
+- `inventory/prod.ini` — подключения как `devops` с ключом `~/.ssh/devops_vm`.
+  Перед первым подключением сверить SSH-отпечаток хоста. Хранить ключ в домашнем
+  каталоге управляющего узла с правами `0600`.
+- `base` устанавливает зависимости и Docker Engine из официального репозитория.
+- `ssh` добавляет открытый ключ, проверяет доступ `devops` и `sudo -n`,
+  затем отключает вход по паролю и настраивает UFW.
+- `nginx` настраивает HTTP reverse proxy на порту 80. Перед reload выполняет
+  `nginx -t`.
+- `app` сначала загружает образ, затем управляет контейнером и проверяет `/health`.
+
+Образ — `ghcr.io/imp-moce/devops-ci-app:92d679c630808f5d06c4935ea794d4b55d9e0e5f`.
+Пакет публичный и допускает анонимный pull. Nginx принимает внешние запросы
+на порту 80 и передаёт их на `127.0.0.1:5000`. Порт контейнера — `5000`.
+Проверка готовности — `GET /health`, HTTP 200 и `{"status":"ok"}`.
+
+Из каталога `ansible/`:
+
+```bash
+ansible-galaxy collection install -r requirements.yml
+ansible-playbook -i inventory/bootstrap.ini site.yml --syntax-check
+ansible-playbook -i inventory/bootstrap.ini site.yml --ask-pass --ask-become-pass
+ansible all -m ping
+ansible-playbook site.yml
+ansible-playbook verify.yml
+curl --fail http://192.168.56.101/health
+```
+
+После первого запуска проверьте `sudo -n true` по ключу, затем используйте
+`prod.ini` через настройки по умолчанию. По неизменной конфигурации
+`site.yml` должен завершиться с `changed=0`. Аудит `verify.yml` читает
+конфигурацию SSH, сведения о контейнере и ответы HTTP. При недоступном теге
+плейбук останавливается на загрузке и оставляет прежний контейнер работающим.
